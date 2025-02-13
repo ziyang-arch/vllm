@@ -60,6 +60,7 @@ from vllm.worker.model_runner_base import (
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
+import pynvml
 logger = init_logger(__name__)
 
 LORA_WARMUP_RANK = 8
@@ -1116,6 +1117,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
 
+       #start nvml
+        pynvml.nvmlInit()
+        device_cnt = pynvml.nvmlDeviceGetCount()
+        logger.info("initialize nvml and get %d devices", device_cnt)
+
         if self.lora_config:
             assert supports_lora(
                 self.model
@@ -1471,7 +1477,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 batch_size=max_batch_size,
                 dtype=self.model_config.dtype,
                 device=self.device)
+        #logger.info("graph_capture:self.device ", self.device)
 
+        
         with self.attn_state.graph_capture(max_batch_size), graph_capture(
                 self.device) as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the

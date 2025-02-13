@@ -21,6 +21,10 @@ from vllm.utils import (enable_trace_function_call_for_thread,
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
+import pynvml
+import threading
+import concurrent.futures
+
 
 logger = init_logger(__name__)
 
@@ -376,6 +380,12 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
+
+    def set_gpu_clocks(handle, gpu_clock):
+        pynvml.nvmlDeviceSetGpuLockedClocks(handle, gpu_clock, gpu_clock)
+    def reset_gpu_clocks(handle):
+        pynvml.nvmlDeviceResetGpuLockedClocks(handle)
+
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
@@ -383,13 +393,30 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         start_time = time.perf_counter()
+        #logger.info("prepare_input")
+        #logger.info(f"Using GPU: {torch.cuda.current_device()}")
+        cur_device=torch.cuda.current_device()
+        cur_handle = pynvml.nvmlDeviceGetHandleByIndex(cur_device)
+        #torch.cuda.synchronize()
+        gpu_clock = 450
+        #threading.Thread(target=pynvml.nvmlDeviceSetGpuLockedClocks, args=(cur_handle, gpu_clock, gpu_clock)).start()
+        #pynvml.nvmlDeviceSetGpuLockedClocks(cur_handle, gpu_clock, gpu_clock)
+
+        # Using concurrent.futures.ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(set_gpu_clocks, cur_handle, gpu_clock)
 
         inputs = self.prepare_input(execute_model_req)
         if inputs is None:
             return None
-
+        #print("get_tp_group ", get_tp_group())
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
+
+        #threading.Thread(target=pynvml.nvmlDeviceResetGpuLockedClocks, args=(cur_handle)).start()
+        #pynvml.nvmlDeviceResetGpuLockedClocks(cur_handle)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(reset_gpu_clocks, cur_handle)
 
         self.execute_worker(worker_input)
 
