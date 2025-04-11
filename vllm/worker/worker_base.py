@@ -24,6 +24,7 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
 import pynvml
 import threading
 import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 
 
 logger = init_logger(__name__)
@@ -398,13 +399,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         cur_device=torch.cuda.current_device()
         cur_handle = pynvml.nvmlDeviceGetHandleByIndex(cur_device)
         #torch.cuda.synchronize()
-        gpu_clock = 450
+        gpu_clock =900
         #threading.Thread(target=pynvml.nvmlDeviceSetGpuLockedClocks, args=(cur_handle, gpu_clock, gpu_clock)).start()
         #pynvml.nvmlDeviceSetGpuLockedClocks(cur_handle, gpu_clock, gpu_clock)
 
         # Using concurrent.futures.ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(set_gpu_clocks, cur_handle, gpu_clock)
+            future = executor.submit(self.set_gpu_clocks, cur_handle, gpu_clock)
 
         inputs = self.prepare_input(execute_model_req)
         if inputs is None:
@@ -416,7 +417,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         #threading.Thread(target=pynvml.nvmlDeviceResetGpuLockedClocks, args=(cur_handle)).start()
         #pynvml.nvmlDeviceResetGpuLockedClocks(cur_handle)
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(reset_gpu_clocks, cur_handle)
+            future = executor.submit(self.reset_gpu_clocks, cur_handle)
+
+        exec_start_time = time.perf_counter()
 
         self.execute_worker(worker_input)
 
@@ -445,6 +448,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         )
 
         model_execute_time = time.perf_counter() - start_time
+        compute_time = time.perf_counter() - exec_start_time
+        logger.info(f"Model execute time: {model_execute_time:.3f}s")
+        logger.info(f"Compute time: {compute_time:.3f}s")
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
             assert isinstance(output, IntermediateTensors)
