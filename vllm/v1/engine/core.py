@@ -562,6 +562,12 @@ class EngineCore:
             self.abort_requests(request_ids)
 
     def shutdown(self):
+        if getattr(self, "_dvfs_handle", None) is not None:
+            try:
+                self._pynvml.nvmlDeviceResetGpuLockedClocks(self._dvfs_handle)
+                logger.info("[DVFS] GPU clocks reset to defaults")
+            except Exception:
+                pass
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
@@ -1025,8 +1031,61 @@ class EngineCoreProc(EngineCore):
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
 
+    # ------------------------------------------------------------------
+    # DVFS helpers  (gated behind DVFS_ENABLED=1)
+    # ------------------------------------------------------------------
+    def _dvfs_init(self):
+        """Lazy one-shot DVFS initialisation."""
+        self._dvfs_ready = True
+        self._dvfs_handle = None
+        if os.environ.get("DVFS_ENABLED", "0") != "1":
+            return
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+            gpu_idx = int(visible.split(",")[0])
+            self._dvfs_handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+            self._dvfs_min = int(os.environ.get("DVFS_MIN_FREQ_MHZ", "210"))
+            self._dvfs_max = int(os.environ.get("DVFS_MAX_FREQ_MHZ", "2520"))
+            self._pynvml = pynvml
+            self.gpu_idx = gpu_idx
+            logger.info("[DVFS] EngineCore GPU %d  min=%d max=%d MHz",
+                        gpu_idx, self._dvfs_min, self._dvfs_max)
+        except Exception as exc:
+            logger.warning("[DVFS] EngineCore init failed: %s", exc)
+            self._dvfs_handle = None
+
+    def _dvfs_lower(self):
+        if self._dvfs_handle is not None:
+            try:
+                self._pynvml.nvmlDeviceSetGpuLockedClocks(
+                    self._dvfs_handle, self._dvfs_min, self._dvfs_min)
+                logger.info("[DVFS] GPU %d clocks -> %d MHz (lowered)",
+                            self.gpu_idx, self._dvfs_min)
+            except Exception as exc:
+                logger.warning("[DVFS] GPU %d lower failed: %s",
+                               self.gpu_idx, exc)
+
+    def _dvfs_restore(self):
+        if self._dvfs_handle is not None:
+            try:
+                self._pynvml.nvmlDeviceSetGpuLockedClocks(
+                    self._dvfs_handle, self._dvfs_max, self._dvfs_max)
+                logger.info("[DVFS] GPU %d clocks -> %d MHz (restored)",
+                            self.gpu_idx, self._dvfs_max)
+            except Exception as exc:
+                logger.warning("[DVFS] GPU %d restore failed: %s",
+                               self.gpu_idx, exc)
+
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
+
+        if not getattr(self, "_dvfs_ready", False):
+            self._dvfs_init()
+            if self._dvfs_handle is not None:
+                logger.info("EngineCore initializing DVFS on device %d",
+                            self.gpu_idx)
 
         waited = False
         while (
@@ -1035,14 +1094,29 @@ class EngineCoreProc(EngineCore):
             and not self.batch_queue
             and not self._scheduler_paused
         ):
+            low_freq = False
+            try:
+                # For Queue, .qsize() may not be reliable on all platforms, but use it if available.
+                queue_size = self.input_queue.qsize()
+            except NotImplementedError:
+                queue_size = "unknown"
+            logger.info(f"EngineCore input_queue size: {queue_size}")
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
                     self.aborts_queue.queue.clear()
                 if logger.isEnabledFor(DEBUG):
-                    logger.debug("EngineCore waiting for work.")
+                    logger.debug("input_queue.empty EngineCore waiting for work. timestamp: %s", time.time())
                     waited = True
+                self._dvfs_lower()
+                logger.info("EngineCore DVFS lowered. timestamp: %s", time.time())
+                low_freq = True
+            print("EngineCore waiting for work. timestamp: %s", time.time())
             req = self.input_queue.get()
+            logger.info("EngineCore got work. timestamp: %s", time.time())
+            if low_freq:
+                self._dvfs_restore()
+                logger.info("EngineCore DVFS restored. timestamp: %s", time.time())
             self._handle_client_request(*req)
 
         if waited:
