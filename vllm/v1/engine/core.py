@@ -1101,22 +1101,26 @@ class EngineCoreProc(EngineCore):
             except NotImplementedError:
                 queue_size = "unknown"
             logger.info(f"EngineCore input_queue size: {queue_size}")
-            if self.input_queue.empty():
-                # Drain aborts queue; all aborts are also processed via input_queue.
-                with self.aborts_queue.mutex:
-                    self.aborts_queue.queue.clear()
-                if logger.isEnabledFor(DEBUG):
-                    logger.debug("input_queue.empty EngineCore waiting for work. timestamp: %s", time.time())
-                    waited = True
-                self._dvfs_lower()
-                logger.info("EngineCore DVFS lowered. timestamp: %s", time.time())
-                low_freq = True
+            if getattr(self, "_dvfs_handle", None) is not None:
+                if self.input_queue.empty():
+                    # Drain aborts queue; all aborts are also processed via input_queue.
+                    with self.aborts_queue.mutex:
+                        self.aborts_queue.queue.clear()
+                    if logger.isEnabledFor(DEBUG):
+                        logger.debug("input_queue.empty EngineCore waiting for work. timestamp: %s", time.time())
+                        waited = True
+                    
+                    self._dvfs_lower()
+                    logger.info("EngineCore DVFS lowered. timestamp: %s", time.time())
+                    low_freq = True
             print("EngineCore waiting for work. timestamp: %s", time.time())
             req = self.input_queue.get()
             logger.info("EngineCore got work. timestamp: %s", time.time())
-            if low_freq:
-                self._dvfs_restore()
-                logger.info("EngineCore DVFS restored. timestamp: %s", time.time())
+            
+            if getattr(self, "_dvfs_handle", None) is not None:
+                if low_freq:
+                    self._dvfs_restore()
+                    logger.info("EngineCore DVFS restored. timestamp: %s", time.time())
             self._handle_client_request(*req)
 
         if waited:
